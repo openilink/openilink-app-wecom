@@ -4,6 +4,15 @@ import type { Store } from "../store.js";
 import type { HubEvent } from "./types.js";
 import { HubClient } from "./client.js";
 
+/** 同步响应截止时间（毫秒），超过此时间返回 reply_async */
+const SYNC_DEADLINE = 2500;
+
+/** command 事件处理器类型，返回文本结果 */
+export type CommandHandler = (
+  event: HubEvent,
+  installationId: string,
+) => Promise<string>;
+
 /**
  * 从 IncomingMessage 中读取完整请求体
  */
@@ -24,11 +33,16 @@ export function readBody(req: IncomingMessage): Promise<string> {
  * 1. 读取请求体
  * 2. 查找安装记录，验证 HMAC-SHA256 签名
  * 3. 处理 url_verification 或业务事件
+ *
+ * command 事件使用 Promise.race + 2500ms deadline 实现同步/异步响应：
+ * - 在 deadline 内完成 → 返回 {"reply": "结果"}
+ * - 超时 → 返回 {"reply_async": true}，后台继续执行并通过 HubClient 异步推送
  */
 export async function handleWebhook(
   req: IncomingMessage,
   res: ServerResponse,
   store: Store,
+  onCommand?: CommandHandler,
 ): Promise<void> {
   /** 只接受 POST 请求 */
   if (req.method !== "POST") {
@@ -79,7 +93,42 @@ export async function handleWebhook(
     return;
   }
 
-  /** 处理业务事件 */
+  /** command 事件：同步/异步响应模式 */
+  if (event.type === "event" && event.event?.type === "command" && onCommand) {
+    const commandPromise = onCommand(event, event.installation_id);
+
+    // 使用 Promise.race 实现 deadline 控制
+    const timeoutSymbol = Symbol("timeout");
+    const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) =>
+      setTimeout(() => resolve(timeoutSymbol), SYNC_DEADLINE),
+    );
+
+    const result = await Promise.race([commandPromise, timeoutPromise]);
+
+    if (result === timeoutSymbol) {
+      // 超时：立即返回异步标记，后台继续执行
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ reply_async: true }));
+      // 后台等待完成后通过 HubClient 异步推送结果
+      commandPromise
+        .then((asyncResult) => {
+          const hubClient = new HubClient(installation.hubUrl, installation.appToken);
+          const userId = (event.event?.data.user_id as string) || "";
+          const convId = (event.event?.data.conversation_id as string) || userId;
+          return hubClient.sendText(installation.id, installation.botId, convId, asyncResult);
+        })
+        .catch((err) => {
+          console.error(`[webhook] command 异步执行异常 (trace=${event.trace_id}):`, err);
+        });
+    } else {
+      // 在 deadline 内完成：同步返回结果
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ reply: result }));
+    }
+    return;
+  }
+
+  /** 处理其他业务事件 */
   if (event.type === "event" && event.event) {
     try {
       await processEvent(event, installation, store);
@@ -136,16 +185,6 @@ async function processEvent(
         installation.botId,
         conversationId,
         `收到消息: ${text}`,
-      );
-      break;
-    }
-
-    case "command": {
-      /** 处理命令事件 */
-      const command = (data.command as string) || "";
-      const userId = (data.user_id as string) || "";
-      console.log(
-        `[webhook] 收到命令: installation=${installation.id}, user=${userId}, cmd=${command}`,
       );
       break;
     }

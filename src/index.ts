@@ -13,6 +13,7 @@ import { HubClient } from "./hub/client.js";
 import { WxToWecom } from "./bridge/wx-to-wecom.js";
 import { WecomToWx } from "./bridge/wecom-to-wx.js";
 import type { WecomMessageData } from "./wecom/event.js";
+import type { HubEvent } from "./hub/types.js";
 
 /** 应用主入口 */
 async function main(): Promise<void> {
@@ -42,6 +43,82 @@ async function main(): Promise<void> {
 
   /** 将工具定义注入到清单中 */
   manifest.tools = definitions;
+
+  /** 将工具定义转换为 Hub 同步格式 */
+  const toolsForHub = definitions.map((t) => ({
+    name: t.name,
+    description: t.description,
+    command: t.command,
+    parameters: t.parameters,
+  }));
+
+  /**
+   * 向指定安装同步工具定义
+   */
+  async function syncToolsToInstallation(hubUrl: string, appToken: string): Promise<void> {
+    const client = new HubClient(hubUrl, appToken);
+    await client.syncTools(toolsForHub);
+  }
+
+  /**
+   * 启动时遍历所有已有安装，同步工具定义
+   */
+  async function syncToolsOnStartup(): Promise<void> {
+    const installations = store.getAllInstallations();
+    if (installations.length === 0) {
+      console.log("[wecom] 暂无安装记录，跳过启动时工具同步");
+      return;
+    }
+
+    console.log("[wecom] 启动时同步工具到 %d 个安装...", installations.length);
+    for (const inst of installations) {
+      try {
+        await syncToolsToInstallation(inst.hubUrl, inst.appToken);
+      } catch (err) {
+        console.error("[wecom] 同步工具到安装 %s 失败:", inst.id, err);
+      }
+    }
+  }
+
+  /**
+   * 处理 command 事件（同步/异步响应模式）
+   * 在 SYNC_DEADLINE 内完成则同步返回，超时则异步推送
+   */
+  async function onCommand(event: HubEvent, installationId: string): Promise<string> {
+    const installation = store.getInstallation(installationId);
+    if (!installation) {
+      return `未找到安装: ${installationId}`;
+    }
+
+    const data = event.event?.data;
+    if (!data) return "缺少事件数据";
+
+    const command = data.command as string;
+    const args = (data.args as Record<string, any>) ?? {};
+    const userId = data.user_id as string;
+
+    const handler = handlers.get(command);
+    if (!handler) {
+      return `未知指令: ${command}`;
+    }
+
+    try {
+      const result = await handler({
+        installationId,
+        botId: event.bot.id,
+        userId,
+        traceId: event.trace_id,
+        args,
+      });
+      return result;
+    } catch (err) {
+      console.error(`[wecom] 工具调用失败: ${command}`, err);
+      // 超时情况下异步推送错误信息
+      const hubClient = new HubClient(installation.hubUrl, installation.appToken);
+      await hubClient.sendText(installationId, installation.botId, userId, `工具 ${command} 执行失败`).catch(() => {});
+      return `工具 ${command} 执行失败`;
+    }
+  }
 
   /** 5. 初始化双向桥接 */
   const wxToWecom = new WxToWecom(wecomClient, store);
@@ -96,15 +173,15 @@ async function main(): Promise<void> {
         return;
       }
 
-      /** OAuth 回调 */
+      /** OAuth 回调（传入工具定义以便同步） */
       if (pathname === "/oauth/redirect" && req.method === "GET") {
-        await handleOAuthRedirect(req, res, config, store);
+        await handleOAuthRedirect(req, res, config, store, toolsForHub);
         return;
       }
 
-      /** Hub Webhook 事件接收 */
+      /** Hub Webhook 事件接收（传入 command 处理器） */
       if (pathname === "/webhook" && req.method === "POST") {
-        await handleWebhook(req, res, store);
+        await handleWebhook(req, res, store, onCommand);
         return;
       }
 
@@ -120,6 +197,11 @@ async function main(): Promise<void> {
 
   server.listen(Number(config.port), () => {
     console.log("[wecom] HTTP 服务已启动: http://0.0.0.0:%s", config.port);
+
+    // 启动后同步工具到所有已有安装
+    syncToolsOnStartup().catch((err) => {
+      console.error("[wecom] 启动时同步工具异常:", err);
+    });
   });
 
   /** 8. 优雅退出 */

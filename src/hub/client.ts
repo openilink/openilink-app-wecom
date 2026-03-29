@@ -75,6 +75,31 @@ export class HubClient {
   }
 
   /**
+   * 同步工具定义到 Hub
+   * PUT {hubUrl}/bot/v1/app/tools
+   * @param tools 工具定义数组
+   */
+  async syncTools(tools: Record<string, unknown>[]): Promise<void> {
+    const url = `${this.hubUrl}/bot/v1/app/tools`;
+
+    const resp = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.appToken}`,
+      },
+      body: JSON.stringify({ tools }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[HubClient] 同步工具失败: status=${resp.status}, body=${errText}`);
+    } else {
+      console.log(`[HubClient] 工具同步成功，共 ${tools.length} 个`);
+    }
+  }
+
+  /**
    * 通用消息发送方法
    * POST /api/v1/bots/{botId}/messages
    */
