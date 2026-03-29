@@ -60,8 +60,11 @@ export const driveTools: ToolModule = {
   definitions: [
     {
       name: 'list_spaces',
-      description: '列出企业微信微盘空间列表',
+      description: '查询企业微信微盘空间信息',
       command: 'list_spaces',
+      parameters: [
+        { name: 'user_id', type: 'string', description: '企业微信成员ID', required: true },
+      ],
     },
     {
       name: 'list_files',
@@ -69,6 +72,7 @@ export const driveTools: ToolModule = {
       command: 'list_files',
       parameters: [
         { name: 'space_id', type: 'string', description: '微盘空间ID', required: true },
+        { name: 'father_id', type: 'string', description: '父目录ID，默认使用空间根目录（即 spaceid）', required: false },
       ],
     },
   ],
@@ -76,17 +80,22 @@ export const driveTools: ToolModule = {
   createHandlers(client: WecomClient): Map<string, ToolHandler> {
     const handlers = new Map<string, ToolHandler>();
 
-    // 列微盘空间
+    // 列微盘空间（使用 space_info 接口，需要调用方传入 userid）
     handlers.set('list_spaces', async (ctx) => {
       try {
+        const { user_id } = ctx.args;
+        if (!user_id) {
+          return '参数错误：user_id 为必填项，请提供企业微信成员 ID';
+        }
         const token = await client.getAccessToken();
-        const url = `${BASE_URL}/cgi-bin/wedrive/space_list?access_token=${token}`;
-        const body = {};
+        const url = `${BASE_URL}/cgi-bin/wedrive/space_info?access_token=${token}`;
+        // space_info 接口需要 userid 来获取该用户可见的空间信息
+        const body = { userid: user_id };
         const data = await fetchPost(url, body);
         if (data.errcode && data.errcode !== 0) {
-          return `获取微盘空间列表失败：[${data.errcode}] ${data.errmsg}`;
+          return `获取微盘空间信息失败：[${data.errcode}] ${data.errmsg}`;
         }
-        const spaces = data.space_list ?? [];
+        const spaces = data.space_info ? [data.space_info] : (data.space_list ?? []);
         if (spaces.length === 0) {
           return '暂无微盘空间';
         }
@@ -95,20 +104,21 @@ export const driveTools: ToolModule = {
         );
         return `共 ${spaces.length} 个微盘空间：\n${lines.join('\n')}`;
       } catch (err: any) {
-        return `获取微盘空间列表失败：${err.message ?? String(err)}`;
+        return `获取微盘空间信息失败：${err.message ?? String(err)}`;
       }
     });
 
-    // 列空间文件
+    // 列空间文件（fatherid 为必填参数，默认用 spaceid 作为根目录）
     handlers.set('list_files', async (ctx) => {
       try {
-        const { space_id } = ctx.args;
+        const { space_id, father_id } = ctx.args;
         if (!space_id) {
           return '参数错误：space_id 为必填项';
         }
         const token = await client.getAccessToken();
         const url = `${BASE_URL}/cgi-bin/wedrive/file_list?access_token=${token}`;
-        const body = { spaceid: space_id };
+        // fatherid 为必填参数，若未传则默认使用 spaceid 作为根目录
+        const body = { spaceid: space_id, fatherid: father_id || space_id };
         const data = await fetchPost(url, body);
         if (data.errcode && data.errcode !== 0) {
           return `获取文件列表失败：[${data.errcode}] ${data.errmsg}`;

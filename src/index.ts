@@ -31,6 +31,7 @@ async function main(): Promise<void> {
     config.wecomBotSecret,
     config.wecomCorpId || undefined,
     config.wecomCorpSecret || undefined,
+    config.wecomAgentId || undefined,
   );
   await wecomClient.start();
   console.log("[wecom] 企业微信客户端已启动");

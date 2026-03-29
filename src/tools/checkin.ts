@@ -132,7 +132,7 @@ export const checkinTools: ToolModule = {
       }
     });
 
-    // 查打卡规则
+    // 查打卡规则（使用 getcheckinoption 接口，需要 datetime 和 useridlist 参数）
     handlers.set('get_checkin_rules', async (ctx) => {
       try {
         const { user_ids } = ctx.args;
@@ -140,25 +140,30 @@ export const checkinTools: ToolModule = {
           return '参数错误：user_ids 为必填项';
         }
         const token = await client.getAccessToken();
-        const url = `${BASE_URL}/cgi-bin/checkin/getcorpcheckinoption?access_token=${token}`;
+        const url = `${BASE_URL}/cgi-bin/checkin/getcheckinoption?access_token=${token}`;
         const userList = user_ids.split(',').map((id: string) => id.trim());
-        const body = { userid: userList };
+        // getcheckinoption 需要 datetime（当前时间戳，秒）和 useridlist
+        const body = {
+          datetime: Math.floor(Date.now() / 1000),
+          useridlist: userList,
+        };
         const data = await fetchPost(url, body);
         if (data.errcode && data.errcode !== 0) {
           return `查询打卡规则失败：[${data.errcode}] ${data.errmsg}`;
         }
-        const groups = data.group ?? [];
-        if (groups.length === 0) {
+        const infos = data.info ?? [];
+        if (infos.length === 0) {
           return '暂无打卡规则数据';
         }
-        const lines = groups.map((g: any) => {
-          const checkinTime = g.checkintime ?? [];
+        const lines = infos.map((item: any) => {
+          const group = item.group ?? {};
+          const checkinTime = group.checkintime ?? [];
           const timeInfo = checkinTime
             .map((t: any) => `${t.work_sec ?? '?'}~${t.off_work_sec ?? '?'}`)
             .join(', ');
-          return `- 规则名称：${g.groupname ?? '未知'}，打卡时间：${timeInfo || '未设置'}`;
+          return `- 成员：${item.userid ?? '未知'}，规则名称：${group.groupname ?? '未知'}，打卡时间：${timeInfo || '未设置'}`;
         });
-        return `共 ${groups.length} 条打卡规则：\n${lines.join('\n')}`;
+        return `共 ${infos.length} 条打卡规则：\n${lines.join('\n')}`;
       } catch (err: any) {
         return `查询打卡规则失败：${err.message ?? String(err)}`;
       }

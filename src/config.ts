@@ -18,6 +18,8 @@ export interface Config {
   wecomCorpId: string;
   /** 应用 Secret（用于 OpenAPI 调用，可选） */
   wecomCorpSecret: string;
+  /** 应用 AgentId（用于发送应用消息，可选） */
+  wecomAgentId: string;
 }
 
 /** 必填配置项清单 */
@@ -44,6 +46,7 @@ export function loadConfig(
     wecomBotSecret: getenv("WECOM_BOT_SECRET")?.trim() || "",
     wecomCorpId: getenv("WECOM_CORP_ID")?.trim() || "",
     wecomCorpSecret: getenv("WECOM_CORP_SECRET")?.trim() || "",
+    wecomAgentId: getenv("WECOM_AGENT_ID")?.trim() || "",
   };
 
   /** 校验必填项 */

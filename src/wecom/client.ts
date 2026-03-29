@@ -11,20 +11,23 @@ export class WecomClient {
   private wsClient: any;
   private corpId: string;
   private corpSecret: string;
+  private agentId: string;
   private accessToken: string = "";
   private tokenExpiresAt: number = 0;
 
   /**
-   * @param botId     智能机器人 BotID
-   * @param botSecret 智能机器人 Secret
-   * @param corpId    企业 ID（可选，用于 OpenAPI 调用）
+   * @param botId      智能机器人 BotID
+   * @param botSecret  智能机器人 Secret
+   * @param corpId     企业 ID（可选，用于 OpenAPI 调用）
    * @param corpSecret 应用 Secret（可选，用于 OpenAPI 调用）
+   * @param agentId    应用 AgentId（可选，用于发送应用消息）
    */
   constructor(
     botId: string,
     botSecret: string,
     corpId?: string,
     corpSecret?: string,
+    agentId?: string,
   ) {
     this.wsClient = new AiBot.WSClient({
       botId,
@@ -32,6 +35,7 @@ export class WecomClient {
     });
     this.corpId = corpId || "";
     this.corpSecret = corpSecret || "";
+    this.agentId = agentId || "";
   }
 
   /**
@@ -149,7 +153,7 @@ export class WecomClient {
     const body = {
       touser: toUser,
       msgtype,
-      agentid: 0, // 实际使用时需根据应用配置填入
+      agentid: this.agentId ? Number(this.agentId) : 0, // 从构造函数参数获取
       [msgtype]: content,
     };
 
