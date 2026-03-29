@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  wecom-bridge:
+    build: .
+    container_name: openilink-app-wecom
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    volumes:
+      - wecom-data:/data
+    environment:
+      - PORT=8085
+      - HUB_URL=${HUB_URL}
+      - BASE_URL=${BASE_URL}
+      - WECOM_BOT_ID=${WECOM_BOT_ID}
+      - WECOM_BOT_SECRET=${WECOM_BOT_SECRET}
+      - WECOM_CORP_ID=${WECOM_CORP_ID:-}
+      - WECOM_CORP_SECRET=${WECOM_CORP_SECRET:-}
+      - DB_PATH=/data/wecom.db
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8085/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  wecom-data:
