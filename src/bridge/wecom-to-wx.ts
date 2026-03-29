@@ -71,12 +71,7 @@ export class WecomToWx {
         installation.appToken,
       );
 
-      await hubClient.sendText(
-        installation.id,
-        installation.botId,
-        link.wxUserId,
-        data.content,
-      );
+      await hubClient.sendText(link.wxUserId, data.content);
 
       console.log(
         `[WecomToWx] 已转发企业微信消息 -> 微信用户 ${link.wxUserId}`,

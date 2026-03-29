@@ -1,4 +1,4 @@
-import type { ToolDefinition, ToolHandler, ToolContext } from "./hub/types.js";
+import type { ToolDefinition, ToolHandler, ToolContext, ToolResult } from "./hub/types.js";
 
 /**
  * 命令路由器
@@ -44,7 +44,7 @@ export class Router {
   async handleCommand(
     text: string,
     ctx: Omit<ToolContext, "args">,
-  ): Promise<string | null> {
+  ): Promise<string | ToolResult | null> {
     const trimmed = text.trim();
     if (!trimmed.startsWith("/")) {
       return null;

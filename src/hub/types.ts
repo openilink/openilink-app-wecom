@@ -1,6 +1,8 @@
 /**
- * Hub 推送给 App 的事件结构
+ * OpeniLink Hub 协议相关类型定义
  */
+
+/** Hub 推送到 App 的事件结构 */
 export interface HubEvent {
   /** 协议版本 */
   v: string;
@@ -23,9 +25,7 @@ export interface HubEvent {
   };
 }
 
-/**
- * Hub App 安装记录
- */
+/** Hub App 安装记录 */
 export interface Installation {
   id: string;
   hubUrl: string;
@@ -36,9 +36,7 @@ export interface Installation {
   createdAt?: string;
 }
 
-/**
- * 企业微信 ↔ 微信 消息关联记录
- */
+/** 企业微信 <-> 微信 消息关联记录 */
 export interface MessageLink {
   id?: number;
   installationId: string;
@@ -49,9 +47,7 @@ export interface MessageLink {
   createdAt?: string;
 }
 
-/**
- * AI Tools 工具定义
- */
+/** AI Tools 工具定义 */
 export interface ToolDefinition {
   /** 工具名称 */
   name: string;
@@ -63,9 +59,7 @@ export interface ToolDefinition {
   parameters?: Record<string, unknown> | Record<string, unknown>[];
 }
 
-/**
- * 工具执行上下文
- */
+/** 工具执行上下文 */
 export interface ToolContext {
   installationId: string;
   botId: string;
@@ -74,7 +68,19 @@ export interface ToolContext {
   args: Record<string, unknown>;
 }
 
-/**
- * 工具处理函数签名
- */
-export type ToolHandler = (ctx: ToolContext) => Promise<string>;
+/** Tool 处理结果 — 支持文本和媒体类型 */
+export interface ToolResult {
+  /** 回复文本 */
+  reply: string;
+  /** 回复类型，默认 text */
+  reply_type?: string;
+  /** 媒体 URL */
+  reply_url?: string;
+  /** 媒体 Base64 */
+  reply_base64?: string;
+  /** 文件名 */
+  reply_name?: string;
+}
+
+/** 工具处理函数签名 */
+export type ToolHandler = (ctx: ToolContext) => Promise<string | ToolResult>;

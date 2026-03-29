@@ -13,7 +13,7 @@ import { HubClient } from "./hub/client.js";
 import { WxToWecom } from "./bridge/wx-to-wecom.js";
 import { WecomToWx } from "./bridge/wecom-to-wx.js";
 import type { WecomMessageData } from "./wecom/event.js";
-import type { HubEvent } from "./hub/types.js";
+import type { HubEvent, ToolResult } from "./hub/types.js";
 
 /** 应用主入口 */
 async function main(): Promise<void> {
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
    * 处理 command 事件（同步/异步响应模式）
    * 在 SYNC_DEADLINE 内完成则同步返回，超时则异步推送
    */
-  async function onCommand(event: HubEvent, installationId: string): Promise<string> {
+  async function onCommand(event: HubEvent, installationId: string): Promise<string | ToolResult> {
     const installation = store.getInstallation(installationId);
     if (!installation) {
       return `未找到安装: ${installationId}`;
@@ -113,11 +113,35 @@ async function main(): Promise<void> {
       return result;
     } catch (err) {
       console.error(`[wecom] 工具调用失败: ${command}`, err);
-      // 超时情况下异步推送错误信息
+      // 异步推送错误信息
       const hubClient = new HubClient(installation.hubUrl, installation.appToken);
-      await hubClient.sendText(installationId, installation.botId, userId, `工具 ${command} 执行失败`).catch(() => {});
+      const to =
+        (data.group as { id?: string })?.id ??
+        (data.sender as { id?: string })?.id ??
+        userId ??
+        (data.from as string) ??
+        "";
+      await hubClient.sendText(to, `工具 ${command} 执行失败`, event.trace_id).catch(() => {});
       return `工具 ${command} 执行失败`;
     }
+  }
+
+  /**
+   * 处理非 command 类型的 Hub 事件
+   */
+  async function onHubEvent(event: HubEvent): Promise<void> {
+    console.log(
+      `[wecom] 收到事件: type=${event.event?.type} id=${event.event?.id} trace=${event.trace_id}`,
+    );
+
+    const installation = store.getInstallation(event.installation_id);
+    if (!installation) {
+      console.warn(`[wecom] 未找到安装: ${event.installation_id}`);
+      return;
+    }
+
+    // TODO: 根据事件类型分发处理
+    console.log(`[wecom] 事件数据:`, JSON.stringify(event.event?.data));
   }
 
   /** 5. 初始化双向桥接 */
@@ -136,7 +160,8 @@ async function main(): Promise<void> {
       traceId: msg.msgId,
     });
     if (cmdResult !== null) {
-      await wecomClient.replyStream(msg.frame, cmdResult);
+      const replyText = typeof cmdResult === "string" ? cmdResult : cmdResult.reply;
+      await wecomClient.replyStream(msg.frame, replyText);
       return;
     }
 
@@ -179,9 +204,9 @@ async function main(): Promise<void> {
         return;
       }
 
-      /** Hub Webhook 事件接收（传入 command 处理器） */
+      /** Hub Webhook 事件接收（传入 onEvent 和 command 处理器） */
       if (pathname === "/webhook" && req.method === "POST") {
-        await handleWebhook(req, res, store, onCommand);
+        await handleWebhook(req, res, store, onHubEvent, onCommand);
         return;
       }
 

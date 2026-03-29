@@ -1,17 +1,26 @@
+/**
+ * Webhook 处理模块
+ * 接收 Hub 推送的事件，验证签名后分发处理
+ * command 事件支持同步/异步响应模式（SYNC_DEADLINE = 2500ms）
+ */
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { verifySignature } from "../utils/crypto.js";
 import type { Store } from "../store.js";
-import type { HubEvent } from "./types.js";
+import type { HubEvent, ToolResult } from "./types.js";
 import { HubClient } from "./client.js";
 
 /** 同步响应截止时间（毫秒），超过此时间返回 reply_async */
 const SYNC_DEADLINE = 2500;
 
-/** command 事件处理器类型，返回文本结果 */
+/** command 事件处理器类型，返回文本或 ToolResult */
 export type CommandHandler = (
   event: HubEvent,
   installationId: string,
-) => Promise<string>;
+) => Promise<string | ToolResult>;
+
+/** 非 command 事件处理器类型 */
+export type EventHandler = (event: HubEvent) => Promise<void>;
 
 /**
  * 从 IncomingMessage 中读取完整请求体
@@ -26,25 +35,43 @@ export function readBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
+ * 将 command 处理结果格式化为同步响应体
+ * 支持纯文本和 ToolResult 媒体类型
+ */
+function formatCommandReply(result: string | ToolResult): Record<string, unknown> {
+  if (typeof result === "string") {
+    return { reply: result };
+  }
+  const resp: Record<string, unknown> = { reply: result.reply };
+  if (result.reply_type) resp.reply_type = result.reply_type;
+  if (result.reply_url) resp.reply_url = result.reply_url;
+  if (result.reply_base64) resp.reply_base64 = result.reply_base64;
+  if (result.reply_name) resp.reply_name = result.reply_name;
+  return resp;
+}
+
+/**
  * 处理 Hub 推送的 Webhook 事件
  * POST /webhook
  *
- * 流程：
- * 1. 读取请求体
- * 2. 查找安装记录，验证 HMAC-SHA256 签名
- * 3. 处理 url_verification 或业务事件
+ * 请求头:
+ *  - X-Timestamp: 时间戳
+ *  - X-Signature: HMAC-SHA256 签名（"sha256=" + hex）
  *
- * command 事件使用 Promise.race + 2500ms deadline 实现同步/异步响应：
- * - 在 deadline 内完成 → 返回 {"reply": "结果"}
- * - 超时 → 返回 {"reply_async": true}，后台继续执行并通过 HubClient 异步推送
+ * 流程:
+ * 1. 先处理 url_verification（无需签名验证）
+ * 2. 查找安装信息，验证签名
+ * 3. command 事件: Promise.race 2500ms，超时返回 reply_async
+ * 4. 非 command: 调 onEvent，返回 {ok: true}
  */
 export async function handleWebhook(
   req: IncomingMessage,
   res: ServerResponse,
   store: Store,
+  onEvent: EventHandler,
   onCommand?: CommandHandler,
 ): Promise<void> {
-  /** 只接受 POST 请求 */
+  // 仅接受 POST 请求
   if (req.method !== "POST") {
     res.writeHead(405, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Method Not Allowed" }));
@@ -60,7 +87,7 @@ export async function handleWebhook(
     return;
   }
 
-  /** 解析事件 */
+  // 解析事件
   let event: HubEvent;
   try {
     event = JSON.parse(body) as HubEvent;
@@ -70,14 +97,14 @@ export async function handleWebhook(
     return;
   }
 
-  /** URL 验证请求直接回传 challenge */
+  // URL 验证请求直接回传 challenge（优先处理，无需签名验证）
   if (event.type === "url_verification") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ challenge: event.challenge }));
     return;
   }
 
-  /** 查找安装记录 */
+  // 查找安装记录
   const installation = store.getInstallation(event.installation_id);
   if (!installation) {
     res.writeHead(404, { "Content-Type": "application/json" });
@@ -85,19 +112,27 @@ export async function handleWebhook(
     return;
   }
 
-  /** 验证签名 */
-  const signature = req.headers["x-hub-signature"] as string | undefined;
-  if (!signature || !verifySignature(installation.webhookSecret, body, signature)) {
+  // 验证签名（X-Timestamp + X-Signature）
+  const timestamp = req.headers["x-timestamp"] as string | undefined;
+  const signature = req.headers["x-signature"] as string | undefined;
+
+  if (!timestamp || !signature) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "缺少签名头" }));
+    return;
+  }
+
+  if (!verifySignature(installation.webhookSecret, timestamp, body, signature)) {
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "签名验证失败" }));
     return;
   }
 
-  /** command 事件：同步/异步响应模式 */
+  // command 事件：同步/异步响应模式
   if (event.type === "event" && event.event?.type === "command" && onCommand) {
     const commandPromise = onCommand(event, event.installation_id);
 
-    // 使用 Promise.race 实现 deadline 控制
+    // 使用 Promise.race + Symbol 哨兵实现 deadline 控制
     const timeoutSymbol = Symbol("timeout");
     const timeoutPromise = new Promise<typeof timeoutSymbol>((resolve) =>
       setTimeout(() => resolve(timeoutSymbol), SYNC_DEADLINE),
@@ -111,87 +146,44 @@ export async function handleWebhook(
       res.end(JSON.stringify({ reply_async: true }));
       // 后台等待完成后通过 HubClient 异步推送结果
       commandPromise
-        .then((asyncResult) => {
+        .then(async (asyncResult) => {
           const hubClient = new HubClient(installation.hubUrl, installation.appToken);
-          const userId = (event.event?.data.user_id as string) || "";
-          const convId = (event.event?.data.conversation_id as string) || userId;
-          return hubClient.sendText(installation.id, installation.botId, convId, asyncResult);
+          const data = event.event?.data ?? {};
+          const to =
+            (data.group as { id?: string })?.id ??
+            (data.sender as { id?: string })?.id ??
+            (data.user_id as string) ??
+            (data.from as string) ??
+            "";
+          if (typeof asyncResult === "string") {
+            await hubClient.sendText(to, asyncResult, event.trace_id);
+          } else {
+            await hubClient.sendMessage(to, asyncResult.reply_type ?? "text", asyncResult.reply, {
+              url: asyncResult.reply_url,
+              base64: asyncResult.reply_base64,
+              filename: asyncResult.reply_name,
+              traceId: event.trace_id,
+            });
+          }
         })
         .catch((err) => {
-          console.error(`[webhook] command 异步执行异常 (trace=${event.trace_id}):`, err);
+          console.error(`[Webhook] command 异步执行异常 (trace=${event.trace_id}):`, err);
         });
     } else {
       // 在 deadline 内完成：同步返回结果
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ reply: result }));
+      res.end(JSON.stringify(formatCommandReply(result)));
     }
     return;
   }
 
-  /** 处理其他业务事件 */
-  if (event.type === "event" && event.event) {
-    try {
-      await processEvent(event, installation, store);
-    } catch (err) {
-      console.error(`[webhook] 处理事件失败: trace_id=${event.trace_id}`, err);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "事件处理失败" }));
-      return;
-    }
-  }
-
+  // 非 command 事件：先返回 200，再异步处理
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ ok: true }));
-}
 
-/**
- * 处理具体业务事件
- * 根据 event.type 分发到不同的处理逻辑
- */
-async function processEvent(
-  hubEvent: HubEvent,
-  installation: { id: string; hubUrl: string; appToken: string; botId: string },
-  store: Store,
-): Promise<void> {
-  const evt = hubEvent.event!;
-  const data = evt.data;
-
-  switch (evt.type) {
-    case "message": {
-      /** 处理消息事件 */
-      const text = (data.text as string) || "";
-      const userId = (data.user_id as string) || "";
-      const userName = (data.user_name as string) || "";
-      const conversationId = (data.conversation_id as string) || "";
-      const msgId = evt.id;
-
-      console.log(
-        `[webhook] 收到消息: installation=${installation.id}, user=${userId}, msg=${msgId}`,
-      );
-
-      /** 保存消息关联 */
-      store.saveMessageLink({
-        installationId: installation.id,
-        wecomMsgId: msgId,
-        wecomConversation: conversationId,
-        wxUserId: userId,
-        wxUserName: userName,
-      });
-
-      /** 回复确认（示例：回显消息） */
-      const client = new HubClient(installation.hubUrl, installation.appToken);
-      await client.sendText(
-        installation.id,
-        installation.botId,
-        conversationId,
-        `收到消息: ${text}`,
-      );
-      break;
-    }
-
-    default:
-      console.log(
-        `[webhook] 未知事件类型: ${evt.type}, trace_id=${hubEvent.trace_id}`,
-      );
+  try {
+    await onEvent(event);
+  } catch (err) {
+    console.error(`[Webhook] 事件处理异常 (trace=${event.trace_id}):`, err);
   }
 }

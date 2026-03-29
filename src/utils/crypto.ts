@@ -1,23 +1,35 @@
+/**
+ * 加密工具模块
+ * 提供 HMAC-SHA256 签名验证和 OAuth2 PKCE 参数生成
+ */
+
 import { createHmac, randomBytes, createHash, timingSafeEqual } from "node:crypto";
 
 /**
- * 使用 HMAC-SHA256 + timingSafeEqual 验证 Webhook 签名
- * @param secret   签名密钥
- * @param payload  请求体原文
- * @param signature 请求头中附带的签名（hex 编码）
+ * 验证 Hub 推送的 webhook 签名
+ * 签名算法: HMAC-SHA256(secret, timestamp + ":" + body)
+ * 对比格式: "sha256=" + hex
+ *
+ * @param secret    - webhook_secret
+ * @param timestamp - 请求头中的时间戳字符串
+ * @param body      - 原始请求体
+ * @param signature - 请求头中携带的签名（"sha256=" + hex 编码）
  * @returns 签名是否合法
  */
 export function verifySignature(
   secret: string,
-  payload: string,
+  timestamp: string,
+  body: string,
   signature: string,
 ): boolean {
-  const expected = createHmac("sha256", secret).update(payload).digest("hex");
+  const expected =
+    "sha256=" +
+    createHmac("sha256", secret)
+      .update(`${timestamp}:${body}`)
+      .digest("hex");
 
-  /** 长度不一致直接拒绝，避免 timingSafeEqual 抛异常 */
-  if (expected.length !== signature.length) {
-    return false;
-  }
+  // 长度不一致直接拒绝，避免 timingSafeEqual 抛异常
+  if (expected.length !== signature.length) return false;
 
   return timingSafeEqual(
     Buffer.from(expected, "utf-8"),
@@ -26,19 +38,21 @@ export function verifySignature(
 }
 
 /**
- * 生成 OAuth PKCE 所需的 code_verifier 和 code_challenge
- * @returns { codeVerifier, codeChallenge } 均为 URL-safe Base64 编码
+ * 生成 PKCE 参数（code_verifier + code_challenge）
+ * 符合 RFC 7636 规范
+ *
+ * @returns { codeVerifier, codeChallenge }
+ *   - codeVerifier: base64url 编码的随机字符串
+ *   - codeChallenge: SHA256(codeVerifier) 的 base64url 编码
  */
 export function generatePKCE(): {
   codeVerifier: string;
   codeChallenge: string;
 } {
-  /** 生成 32 字节随机 code_verifier（编码后 43 字符） */
-  const codeVerifier = randomBytes(32)
-    .toString("base64url")
-    .replace(/[^a-zA-Z0-9\-._~]/g, "");
+  // 生成 base64url 编码的随机 code_verifier
+  const codeVerifier = randomBytes(32).toString("base64url");
 
-  /** S256 变换：SHA-256(code_verifier) → Base64url */
+  // code_challenge = BASE64URL(SHA256(code_verifier))
   const codeChallenge = createHash("sha256")
     .update(codeVerifier)
     .digest("base64url");

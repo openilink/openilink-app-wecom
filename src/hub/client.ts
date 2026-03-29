@@ -1,7 +1,21 @@
 /**
- * OpeniLink Hub Bot API 客户端
- * 用于向 Hub 发送消息和文件
+ * Hub Bot API 客户端
+ * 通过 Hub 提供的 REST API 发送消息
+ * 路径: POST {hubUrl}/bot/v1/message/send
  */
+
+/** 发送消息的可选参数 */
+interface SendMessageOptions {
+  /** 媒体 URL */
+  url?: string;
+  /** Base64 编码的媒体内容 */
+  base64?: string;
+  /** 文件名 */
+  filename?: string;
+  /** 追踪 ID */
+  traceId?: string;
+}
+
 export class HubClient {
   private hubUrl: string;
   private appToken: string;
@@ -12,133 +26,100 @@ export class HubClient {
   }
 
   /**
-   * 发送文本消息
-   * @param installationId 安装 ID
-   * @param botId Bot ID
-   * @param conversationId 会话 ID
-   * @param text 消息文本
+   * 发送通用消息
+   * POST {hubUrl}/bot/v1/message/send
+   *
+   * @param to      - 目标用户/群组 ID
+   * @param type    - 消息类型（text / image / file 等）
+   * @param content - 消息内容
+   * @param options - 可选参数（url / base64 / filename / traceId）
    */
-  async sendText(
-    installationId: string,
-    botId: string,
-    conversationId: string,
-    text: string,
-  ): Promise<SendMessageResult> {
-    return this.sendMessage(installationId, botId, conversationId, {
-      type: "text",
-      text,
+  async sendMessage(
+    to: string,
+    type: string,
+    content: string,
+    options?: SendMessageOptions,
+  ): Promise<Record<string, unknown>> {
+    const url = `${this.hubUrl}/bot/v1/message/send`;
+    const traceId = options?.traceId ?? crypto.randomUUID();
+
+    const body: Record<string, unknown> = { to, type, content };
+    if (options?.url) body.url = options.url;
+    if (options?.base64) body.base64 = options.base64;
+    if (options?.filename) body.filename = options.filename;
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.appToken}`,
+        "X-Trace-Id": traceId,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(
+        `Hub API 请求失败: ${res.status} ${res.statusText} — ${errText}`,
+      );
+    }
+
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * 发送文本消息
+   * @param to      - 目标用户/群组 ID
+   * @param text    - 文本内容
+   * @param traceId - 追踪 ID（可选）
+   */
+  async sendText(to: string, text: string, traceId?: string): Promise<void> {
+    await this.sendMessage(to, "text", text, { traceId });
   }
 
   /**
    * 发送图片消息
-   * @param installationId 安装 ID
-   * @param botId Bot ID
-   * @param conversationId 会话 ID
-   * @param imageUrl 图片 URL
-   * @param caption 图片说明（可选）
+   * @param to      - 目标用户/群组 ID
+   * @param url     - 图片 URL
+   * @param traceId - 追踪 ID（可选）
    */
-  async sendImage(
-    installationId: string,
-    botId: string,
-    conversationId: string,
-    imageUrl: string,
-    caption?: string,
-  ): Promise<SendMessageResult> {
-    return this.sendMessage(installationId, botId, conversationId, {
-      type: "image",
-      image_url: imageUrl,
-      caption,
-    });
-  }
-
-  /**
-   * 发送文件消息
-   * @param installationId 安装 ID
-   * @param botId Bot ID
-   * @param conversationId 会话 ID
-   * @param fileUrl 文件 URL
-   * @param fileName 文件名
-   */
-  async sendFile(
-    installationId: string,
-    botId: string,
-    conversationId: string,
-    fileUrl: string,
-    fileName: string,
-  ): Promise<SendMessageResult> {
-    return this.sendMessage(installationId, botId, conversationId, {
-      type: "file",
-      file_url: fileUrl,
-      file_name: fileName,
-    });
+  async sendImage(to: string, url: string, traceId?: string): Promise<void> {
+    await this.sendMessage(to, "image", "", { url, traceId });
   }
 
   /**
    * 同步工具定义到 Hub
    * PUT {hubUrl}/bot/v1/app/tools
-   * @param tools 工具定义数组
+   * @param tools - 工具定义数组
    */
   async syncTools(tools: Record<string, unknown>[]): Promise<void> {
     const url = `${this.hubUrl}/bot/v1/app/tools`;
 
-    const resp = await fetch(url, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.appToken}`,
-      },
-      body: JSON.stringify({ tools }),
-    });
+    try {
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.appToken}`,
+        },
+        body: JSON.stringify({ tools }),
+        signal: AbortSignal.timeout(30_000),
+      });
 
-    if (!resp.ok) {
-      const errText = await resp.text();
-      console.error(`[HubClient] 同步工具失败: status=${resp.status}, body=${errText}`);
-    } else {
-      console.log(`[HubClient] 工具同步成功，共 ${tools.length} 个`);
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`[HubClient] 同步工具失败: ${res.status} — ${errText}`);
+      } else {
+        console.log(`[HubClient] 工具同步成功，共 ${tools.length} 个`);
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        console.error("[HubClient] 同步工具超时 (30s)");
+      } else {
+        console.error("[HubClient] 同步工具异常:", err);
+      }
     }
   }
-
-  /**
-   * 通用消息发送方法
-   * POST /api/v1/bots/{botId}/messages
-   */
-  async sendMessage(
-    installationId: string,
-    botId: string,
-    conversationId: string,
-    content: Record<string, unknown>,
-  ): Promise<SendMessageResult> {
-    const url = `${this.hubUrl}/api/v1/bots/${botId}/messages`;
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.appToken}`,
-        "X-Installation-Id": installationId,
-      },
-      body: JSON.stringify({
-        conversation_id: conversationId,
-        content,
-      }),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw new Error(
-        `Hub API 调用失败: status=${resp.status}, body=${errText}`,
-      );
-    }
-
-    const result = (await resp.json()) as SendMessageResult;
-    return result;
-  }
-}
-
-/** 消息发送结果 */
-export interface SendMessageResult {
-  ok: boolean;
-  message_id?: string;
-  error?: string;
 }
