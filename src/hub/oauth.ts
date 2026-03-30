@@ -1,11 +1,10 @@
 /**
- * OAuth2 + PKCE 安装流程
+ * OAuth2 + PKCE 安装流程（含 setup 配置页）
  *
- * 1. Hub 访问 /oauth/setup → 本模块生成 PKCE，重定向到 Hub 授权页
- *    查询参数: hub, app_id, bot_id, state(hub_state), return_url
- * 2. Hub 授权完成后回调 /oauth/redirect → 用 code + code_verifier 换取安装信息
- *    Exchange: POST {hub}/api/apps/{appId}/oauth/exchange body: {code, code_verifier}
- * 3. 成功后同步 tools + 重定向到 returnUrl
+ * 1. Hub 访问 GET /oauth/setup → 显示企业微信配置表单
+ * 2. 用户填写后 POST /oauth/setup → 生成 PKCE，重定向到 Hub 授权页
+ * 3. Hub 授权完成后回调 GET /oauth/redirect → 用 code + code_verifier 换取安装信息
+ * 4. 成功后同步 tools + 重定向到 returnUrl
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -14,68 +13,160 @@ import type { Store } from "../store.js";
 import type { Config } from "../config.js";
 import type { Installation } from "./types.js";
 import { HubClient } from "./client.js";
+import { readBody } from "./webhook.js";
+
+/** PKCE 缓存条目（含用户填写的企微 Key 配置） */
+interface PKCEEntry {
+  verifier: string;
+  hub: string;
+  appId: string;
+  returnUrl: string;
+  /** 用户在 setup 页面填写的企微凭证 */
+  userConfig?: Record<string, string>;
+  expiresAt: number;
+}
+
+/** PKCE 缓存，key 为 localState，10 分钟过期 */
+const pkceCache = new Map<string, PKCEEntry>();
+
+/** 缓存过期时间：10 分钟 */
+const PKCE_TTL_MS = 10 * 60 * 1000;
+
+/** 清理过期的 PKCE 条目 */
+function cleanExpired(): void {
+  const now = Date.now();
+  for (const [key, entry] of pkceCache) {
+    if (entry.expiresAt < now) {
+      pkceCache.delete(key);
+    }
+  }
+}
 
 /**
- * 临时存储 PKCE localState → {verifier, hub, appId, returnUrl}
- * 生产环境建议使用 Redis 等外部存储
+ * 处理 OAuth 安装流程第一步：
+ * GET  → 显示配置表单 HTML，让用户填写企微 Key
+ * POST → 读取表单数据，生成 PKCE 并重定向到 Hub 授权页
+ * 路由: GET/POST /oauth/setup
  */
-const pendingStates = new Map<
-  string,
-  { verifier: string; hub: string; appId: string; returnUrl: string }
->();
-
-/**
- * 处理 OAuth 安装发起请求
- * GET /oauth/setup
- *
- * 查询参数:
- *  - hub: Hub 地址
- *  - app_id: 应用 ID
- *  - bot_id: Bot ID
- *  - state: Hub 侧传来的 state（hub_state）
- *  - return_url: 安装完成后重定向地址
- */
-export function handleOAuthSetup(
+export async function handleOAuthSetup(
   req: IncomingMessage,
   res: ServerResponse,
   config: Config,
-): void {
-  const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  const hub = url.searchParams.get("hub");
-  const appId = url.searchParams.get("app_id");
-  const botId = url.searchParams.get("bot_id") ?? "";
-  const hubState = url.searchParams.get("state") ?? "";
-  const returnUrl = url.searchParams.get("return_url") ?? "";
+): Promise<void> {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  const params = url.searchParams;
 
-  if (!hub || !appId) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "缺少 hub 或 app_id 参数" }));
+  const hub = params.get("hub") ?? config.hubUrl;
+  const appId = params.get("app_id") ?? "";
+  const botId = params.get("bot_id") ?? "";
+  const state = params.get("state") ?? "";
+  const returnUrl = params.get("return_url") ?? "";
+
+  // POST 请求 — 用户提交了配置表单
+  if (req.method === "POST") {
+    const body = await readBody(req);
+    const formData = new URLSearchParams(body.toString());
+    const wecomBotId = formData.get("wecom_bot_id") || "";
+    const wecomBotSecret = formData.get("wecom_bot_secret") || "";
+    const wecomCorpId = formData.get("wecom_corp_id") || "";
+    const wecomCorpSecret = formData.get("wecom_corp_secret") || "";
+    const wecomAgentId = formData.get("wecom_agent_id") || "";
+
+    if (!hub || !appId || !botId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "缺少必填参数: hub, app_id, bot_id" }));
+      return;
+    }
+
+    // 清理过期缓存
+    cleanExpired();
+
+    // 生成 PKCE
+    const { codeVerifier, codeChallenge } = generatePKCE();
+    const localState = crypto.randomUUID();
+
+    // 缓存 PKCE + 用户填的 Key
+    pkceCache.set(localState, {
+      verifier: codeVerifier,
+      hub,
+      appId,
+      returnUrl,
+      userConfig: {
+        wecom_bot_id: wecomBotId,
+        wecom_bot_secret: wecomBotSecret,
+        wecom_corp_id: wecomCorpId,
+        wecom_corp_secret: wecomCorpSecret,
+        wecom_agent_id: wecomAgentId,
+      },
+      expiresAt: Date.now() + PKCE_TTL_MS,
+    });
+
+    // 重定向到 Hub 授权页
+    const authorizeUrl = new URL(`/api/apps/${appId}/oauth/authorize`, hub);
+    if (botId) authorizeUrl.searchParams.set("bot_id", botId);
+    authorizeUrl.searchParams.set("state", localState);
+    authorizeUrl.searchParams.set("code_challenge", codeChallenge);
+    if (state) authorizeUrl.searchParams.set("hub_state", state);
+
+    res.writeHead(302, { Location: authorizeUrl.toString() });
+    res.end();
     return;
   }
 
-  const { codeVerifier, codeChallenge } = generatePKCE();
+  // GET 请求 — 显示配置表单 HTML
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>企业微信 Bridge — 配置</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { background: white; border-radius: 12px; padding: 32px; max-width: 420px; width: 100%; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .desc { color: #666; font-size: 14px; margin-bottom: 24px; }
+    label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #333; }
+    input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; margin-bottom: 16px; }
+    input:focus { outline: none; border-color: #3370ff; }
+    .required::after { content: " *"; color: red; }
+    button { width: 100%; padding: 12px; background: #3370ff; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+    button:hover { background: #2860e0; }
+    .hint { font-size: 12px; color: #999; margin-top: -12px; margin-bottom: 16px; }
+    a { color: #3370ff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>企业微信 Bridge</h1>
+    <p class="desc">请填写您的企业微信应用凭证，用于连接企业微信 API</p>
+    <form method="POST" action="/oauth/setup?hub=${encodeURIComponent(hub)}&app_id=${encodeURIComponent(appId)}&bot_id=${encodeURIComponent(botId)}&state=${encodeURIComponent(state)}&return_url=${encodeURIComponent(returnUrl)}">
+      <label class="required">企微 BotID</label>
+      <input name="wecom_bot_id" placeholder="智能机器人的 BotID" required />
+      <p class="hint">在企业微信管理后台 → 应用管理 → 智能机器人中获取</p>
 
-  // 生成本地随机 localState，缓存关键信息
-  const localState = crypto.randomUUID();
-  pendingStates.set(localState, {
-    verifier: codeVerifier,
-    hub,
-    appId,
-    returnUrl,
-  });
+      <label class="required">Bot Secret</label>
+      <input name="wecom_bot_secret" type="password" placeholder="智能机器人的 Secret" required />
 
-  // 5 分钟后自动清理，防止内存泄漏
-  setTimeout(() => pendingStates.delete(localState), 5 * 60 * 1000);
+      <label>企业 ID（可选）</label>
+      <input name="wecom_corp_id" placeholder="用于 OpenAPI 调用" />
+      <p class="hint">在企业微信管理后台 → 我的企业中查看</p>
 
-  // 构造 Hub 授权 URL: {hub}/api/apps/{appId}/oauth/authorize
-  const authorizeUrl = new URL(`/api/apps/${appId}/oauth/authorize`, hub);
-  if (botId) authorizeUrl.searchParams.set("bot_id", botId);
-  authorizeUrl.searchParams.set("state", localState);
-  authorizeUrl.searchParams.set("code_challenge", codeChallenge);
-  if (hubState) authorizeUrl.searchParams.set("hub_state", hubState);
+      <label>应用 Secret（可选）</label>
+      <input name="wecom_corp_secret" type="password" placeholder="自建应用的 Secret" />
 
-  res.writeHead(302, { Location: authorizeUrl.toString() });
-  res.end();
+      <label>AgentID（可选）</label>
+      <input name="wecom_agent_id" placeholder="应用的 AgentId" />
+      <p class="hint">用于发送应用消息，在应用详情页查看</p>
+
+      <button type="submit">确认并安装</button>
+    </form>
+  </div>
+</body>
+</html>`;
+
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
 }
 
 /**
@@ -103,18 +194,20 @@ export async function handleOAuthRedirect(
     return;
   }
 
-  const pending = pendingStates.get(state);
+  // 清理过期缓存
+  cleanExpired();
+
+  const pending = pkceCache.get(state);
   if (!pending) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "无效或已过期的 state" }));
     return;
   }
 
-  pendingStates.delete(state);
+  pkceCache.delete(state);
 
   try {
     // 用 code + code_verifier 换取安装信息
-    // POST {hub}/api/apps/{appId}/oauth/exchange
     const exchangeUrl = `${pending.hub.replace(/\/+$/, "")}/api/apps/${pending.appId}/oauth/exchange`;
     const tokenResp = await fetch(exchangeUrl, {
       method: "POST",
@@ -157,6 +250,12 @@ export async function handleOAuthRedirect(
 
     store.saveInstallation(installation);
     console.log(`[OAuth] 安装成功: ${installation.id}`);
+
+    // 将用户在 setup 页面填写的企微 Key 加密存储到本地
+    if (pending.userConfig && Object.values(pending.userConfig).some((v) => v)) {
+      store.saveConfig(installation.id, pending.userConfig, installation.appToken);
+      console.log("[OAuth] 用户配置已加密存储");
+    }
 
     // 安装成功后拉取用户配置并加密存储到本地
     {

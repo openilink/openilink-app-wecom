@@ -15,6 +15,12 @@ export interface AppManifest {
   /** 所需权限范围 */
   scopes: string[];
   tools: ToolDefinition[];
+  /** OAuth 安装配置页 URL */
+  oauth_setup_url?: string;
+  /** OAuth 回调 URL */
+  oauth_redirect_url?: string;
+  /** Webhook 接收 URL */
+  webhook_url?: string;
   /** 配置项 JSON Schema */
   config_schema: Record<string, unknown>;
   /** 安装引导说明（Markdown） */

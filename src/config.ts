@@ -1,5 +1,7 @@
 /**
  * 应用配置接口定义
+ * 注意：wecomBotId / wecomBotSecret 等企微凭证在云端托管模式下为可选，
+ * 用户会在 OAuth setup 页面自行填写并加密存储到本地数据库。
  */
 export interface Config {
   /** HTTP 监听端口，默认 "8085" */
@@ -10,9 +12,9 @@ export interface Config {
   baseUrl: string;
   /** SQLite 数据库文件路径，默认 "data/wecom.db" */
   dbPath: string;
-  /** 企业微信智能机器人 BotID，必填 */
+  /** 企业微信智能机器人 BotID（可选，云端托管模式下由用户在安装时填写） */
   wecomBotId: string;
-  /** 企业微信智能机器人 Secret，必填 */
+  /** 企业微信智能机器人 Secret（可选，云端托管模式下由用户在安装时填写） */
   wecomBotSecret: string;
   /** 企业 ID（用于 OpenAPI 调用，可选） */
   wecomCorpId: string;
@@ -22,12 +24,10 @@ export interface Config {
   wecomAgentId: string;
 }
 
-/** 必填配置项清单 */
+/** 必填配置项清单 — 只有 Hub 和 BaseURL 是必填，企微凭证在云端托管模式下由用户安装时填写 */
 const REQUIRED_KEYS: (keyof Config)[] = [
   "hubUrl",
   "baseUrl",
-  "wecomBotId",
-  "wecomBotSecret",
 ];
 
 /**

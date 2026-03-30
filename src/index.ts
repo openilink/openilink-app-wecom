@@ -7,6 +7,7 @@ import { WecomClient } from "./wecom/client.js";
 import { registerWecomEvents } from "./wecom/event.js";
 import { collectAllTools } from "./tools/index.js";
 import { handleOAuthSetup, handleOAuthRedirect } from "./hub/oauth.js";
+import { handleSettingsPage, handleSettingsVerify, handleSettingsSave } from "./hub/settings.js";
 import { handleWebhook, readBody } from "./hub/webhook.js";
 import { getManifestJSON, manifest } from "./hub/manifest.js";
 import { HubClient } from "./hub/client.js";
@@ -25,25 +26,35 @@ async function main(): Promise<void> {
   const store = new Store(config.dbPath);
   console.log("[wecom] 数据库已连接: %s", config.dbPath);
 
-  /** 3. 创建企业微信客户端并启动长连接 */
-  const wecomClient = new WecomClient(
-    config.wecomBotId,
-    config.wecomBotSecret,
-    config.wecomCorpId || undefined,
-    config.wecomCorpSecret || undefined,
-    config.wecomAgentId || undefined,
-  );
-  await wecomClient.start();
-  console.log("[wecom] 企业微信客户端已启动");
+  /** 3. 创建企业微信客户端并启动长连接（如果环境变量中配置了企微凭证） */
+  const hasWecomCredentials = !!(config.wecomBotId && config.wecomBotSecret);
+  let wecomClient: WecomClient | null = null;
+  if (hasWecomCredentials) {
+    wecomClient = new WecomClient(
+      config.wecomBotId,
+      config.wecomBotSecret,
+      config.wecomCorpId || undefined,
+      config.wecomCorpSecret || undefined,
+      config.wecomAgentId || undefined,
+    );
+    await wecomClient.start();
+    console.log("[wecom] 企业微信客户端已启动");
+  } else {
+    console.log("[wecom] 未配置企微凭证，跳过默认客户端初始化（云端托管模式，用户安装时填写）");
+  }
 
-  /** 4. 收集所有 AI Tools 并创建路由 */
-  const { definitions, handlers } = collectAllTools(wecomClient);
+  /** 4. 收集所有 AI Tools 并创建路由（如果没有默认客户端则用空凭证客户端仅收集定义） */
+  const toolsSdkClient = wecomClient ?? new WecomClient("", "");
+  const { definitions, handlers } = collectAllTools(toolsSdkClient);
   const router = new Router();
   router.register(definitions, handlers);
   console.log("[wecom] 已注册 %d 个 AI Tools", definitions.length);
 
-  /** 将工具定义注入到清单中 */
+  /** 将工具定义和 URL 注入到清单中 */
   manifest.tools = definitions;
+  manifest.oauth_setup_url = `${config.baseUrl}/oauth/setup`;
+  manifest.oauth_redirect_url = `${config.baseUrl}/oauth/redirect`;
+  manifest.webhook_url = `${config.baseUrl}/webhook`;
 
   /** 将工具定义转换为 Hub 同步格式 */
   const toolsForHub = definitions.map((t) => ({
@@ -152,33 +163,38 @@ async function main(): Promise<void> {
     console.log(`[wecom] 事件数据:`, JSON.stringify(event.event?.data));
   }
 
-  /** 5. 初始化双向桥接 */
-  const wxToWecom = new WxToWecom(wecomClient, store);
-  const wecomToWx = new WecomToWx(store);
+  /** 5. 初始化双向桥接（仅在配置了企微凭证时启用） */
+  const wxToWecom = wecomClient ? new WxToWecom(wecomClient, store) : null;
+  const wecomToWx = wecomClient ? new WecomToWx(store) : null;
 
-  /** 6. 注册企业微信长连接消息事件 */
-  registerWecomEvents(wecomClient.getWSClient(), async (msg: WecomMessageData) => {
-    console.log("[wecom] 收到企业微信消息: userId=%s, type=%s", msg.userId, msg.msgType);
+  /** 6. 注册企业微信长连接消息事件（仅在配置了企微凭证时启用） */
+  if (wecomClient) {
+    const _wecomClient = wecomClient;
+    registerWecomEvents(_wecomClient.getWSClient(), async (msg: WecomMessageData) => {
+      console.log("[wecom] 收到企业微信消息: userId=%s, type=%s", msg.userId, msg.msgType);
 
-    /** 先尝试命令路由 */
-    const cmdResult = await router.handleCommand(msg.content, {
-      installationId: "",
-      botId: config.wecomBotId,
-      userId: msg.userId,
-      traceId: msg.msgId,
+      /** 先尝试命令路由 */
+      const cmdResult = await router.handleCommand(msg.content, {
+        installationId: "",
+        botId: config.wecomBotId,
+        userId: msg.userId,
+        traceId: msg.msgId,
+      });
+      if (cmdResult !== null) {
+        const replyText = typeof cmdResult === "string" ? cmdResult : cmdResult.reply;
+        await _wecomClient.replyStream(msg.frame, replyText);
+        return;
+      }
+
+      /** 非命令消息通过桥接转发到微信 */
+      const installations = store.getAllInstallations();
+      if (installations.length > 0 && wecomToWx) {
+        await wecomToWx.handleWecomMessage(msg, installations);
+      }
     });
-    if (cmdResult !== null) {
-      const replyText = typeof cmdResult === "string" ? cmdResult : cmdResult.reply;
-      await wecomClient.replyStream(msg.frame, replyText);
-      return;
-    }
-
-    /** 非命令消息通过桥接转发到微信 */
-    const installations = store.getAllInstallations();
-    if (installations.length > 0) {
-      await wecomToWx.handleWecomMessage(msg, installations);
-    }
-  });
+  } else {
+    console.log("[wecom] 未配置企微凭证，跳过长连接消息事件注册");
+  }
 
   /** 7. 启动 HTTP 服务 */
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -200,9 +216,27 @@ async function main(): Promise<void> {
         return;
       }
 
-      /** OAuth 安装发起 */
-      if (pathname === "/oauth/setup" && req.method === "GET") {
-        handleOAuthSetup(req, res, config);
+      /** OAuth 安装发起（GET 显示配置表单，POST 提交后跳转授权） */
+      if (pathname === "/oauth/setup" && (req.method === "GET" || req.method === "POST")) {
+        await handleOAuthSetup(req, res, config);
+        return;
+      }
+
+      /** GET /settings — 设置页面（输入 token 验证身份） */
+      if (req.method === "GET" && pathname === "/settings") {
+        handleSettingsPage(req, res);
+        return;
+      }
+
+      /** POST /settings/verify — 验证 token 后显示配置表单 */
+      if (req.method === "POST" && pathname === "/settings/verify") {
+        await handleSettingsVerify(req, res, config, store);
+        return;
+      }
+
+      /** POST /settings/save — 保存修改后的配置 */
+      if (req.method === "POST" && pathname === "/settings/save") {
+        await handleSettingsSave(req, res, config, store);
         return;
       }
 
@@ -273,7 +307,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     console.log("[wecom] 收到 %s 信号，正在关闭...", signal);
     server.close();
-    await wecomClient.stop();
+    if (wecomClient) await wecomClient.stop();
     store.close();
     console.log("[wecom] 已安全关闭");
     process.exit(0);
