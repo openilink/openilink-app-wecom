@@ -29,20 +29,21 @@ export class WecomToWx {
       return;
     }
 
-    /** 根据企业微信消息 ID 查找关联记录 */
-    let link = this.store.getMessageLinkByWecomMsg(data.msgId);
+    /** 根据企业微信消息 ID 查找关联记录，遍历所有安装实例 */
+    let link: import("../hub/types.js").MessageLink | undefined;
+    for (const inst of installations) {
+      link = this.store.getMessageLinkByWecomMsg(data.msgId, inst.id);
+      if (link) break;
+    }
 
     /** 如果没有直接的消息关联，尝试通过会话 ID 查找最近的关联 */
     if (!link) {
-      const allLinks = installations
-        .map(() => {
-          /** 尝试用会话 ID 作为关键字查找 */
-          return this.store.getLatestLinkByWxUser(data.conversationId);
-        })
-        .filter(Boolean);
-
-      if (allLinks.length > 0) {
-        link = allLinks[0]!;
+      for (const inst of installations) {
+        const found = this.store.getLatestLinkByWxUser(data.conversationId, inst.id);
+        if (found) {
+          link = found;
+          break;
+        }
       }
     }
 

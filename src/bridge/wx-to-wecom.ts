@@ -55,7 +55,7 @@ export class WxToWecom {
 
     /** 确定企业微信目标用户，优先查找历史关联记录 */
     const latestLink = fromUserId
-      ? this.store.getLatestLinkByWxUser(fromUserId)
+      ? this.store.getLatestLinkByWxUser(fromUserId, installation.id)
       : undefined;
 
     /** 如果有历史关联的企业微信会话，使用对应的会话用户 */

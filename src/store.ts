@@ -111,21 +111,21 @@ export class Store {
     return Number(result.lastInsertRowid);
   }
 
-  /** 根据企业微信消息 ID 查询关联记录 */
-  getMessageLinkByWecomMsg(wecomMsgId: string): MessageLink | undefined {
+  /** 根据企业微信消息 ID 和安装实例 ID 查询关联记录 */
+  getMessageLinkByWecomMsg(wecomMsgId: string, installationId: string): MessageLink | undefined {
     const row = this.db
-      .prepare("SELECT * FROM message_links WHERE wecom_msg_id = ? LIMIT 1")
-      .get(wecomMsgId) as MessageLinkRow | undefined;
+      .prepare("SELECT * FROM message_links WHERE wecom_msg_id = ? AND installation_id = ? LIMIT 1")
+      .get(wecomMsgId, installationId) as MessageLinkRow | undefined;
     return row ? rowToMessageLink(row) : undefined;
   }
 
-  /** 查询某微信用户的最新关联记录 */
-  getLatestLinkByWxUser(wxUserId: string): MessageLink | undefined {
+  /** 查询某微信用户在指定安装实例下的最新关联记录 */
+  getLatestLinkByWxUser(wxUserId: string, installationId: string): MessageLink | undefined {
     const row = this.db
       .prepare(
-        "SELECT * FROM message_links WHERE wx_user_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM message_links WHERE wx_user_id = ? AND installation_id = ? ORDER BY created_at DESC LIMIT 1",
       )
-      .get(wxUserId) as MessageLinkRow | undefined;
+      .get(wxUserId, installationId) as MessageLinkRow | undefined;
     return row ? rowToMessageLink(row) : undefined;
   }
 
