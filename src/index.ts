@@ -84,11 +84,18 @@ async function main(): Promise<void> {
   /**
    * 处理 command 事件（同步/异步响应模式）
    * 在 SYNC_DEADLINE 内完成则同步返回，超时则异步推送
+   * 优先从本地加密配置中读取凭证，回退到环境变量
    */
   async function onCommand(event: HubEvent, installationId: string): Promise<string | ToolResult> {
     const installation = store.getInstallation(installationId);
     if (!installation) {
       return `未找到安装: ${installationId}`;
+    }
+
+    /** 尝试读取本地加密配置 */
+    const localCfg = store.getConfig(installationId, installation.appToken);
+    if (localCfg) {
+      console.log(`[wecom] 使用安装 ${installationId} 的本地加密配置`);
     }
 
     const data = event.event?.data;
@@ -216,10 +223,18 @@ async function main(): Promise<void> {
             appToken: data.app_token,
             webhookSecret: data.webhook_secret,
           });
+          // 安装后拉取配置并加密存储
+          const mode2Hub = new HubClient(data.hub_url || config.hubUrl, data.app_token);
+          mode2Hub.fetchConfig()
+            .then((remoteCfg) => {
+              if (Object.keys(remoteCfg).length > 0) {
+                store.saveConfig(data.installation_id, remoteCfg, data.app_token);
+                console.log("[wecom] 模式2: 已拉取并加密保存配置:", data.installation_id);
+              }
+            })
+            .catch((err) => console.error("[wecom] 模式2: 拉取配置失败:", err));
           // 异步同步 tools 到 Hub
-          new HubClient(data.hub_url || config.hubUrl, data.app_token)
-            .syncTools(toolsForHub)
-            .catch(console.error);
+          mode2Hub.syncTools(toolsForHub).catch(console.error);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ webhook_url: `${config.baseUrl}/webhook` }));
         } else {

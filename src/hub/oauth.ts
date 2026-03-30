@@ -158,12 +158,25 @@ export async function handleOAuthRedirect(
     store.saveInstallation(installation);
     console.log(`[OAuth] 安装成功: ${installation.id}`);
 
-    // 成功后同步工具定义到 Hub
-    if (tools && tools.length > 0) {
+    // 安装成功后拉取用户配置并加密存储到本地
+    {
       const hubClient = new HubClient(installation.hubUrl, installation.appToken);
-      await hubClient.syncTools(tools).catch((err) => {
-        console.error("[OAuth] 同步工具失败:", err);
-      });
+      try {
+        const remoteConfig = await hubClient.fetchConfig();
+        if (Object.keys(remoteConfig).length > 0) {
+          store.saveConfig(installation.id, remoteConfig, installation.appToken);
+          console.log(`[OAuth] 已拉取并加密保存配置: ${installation.id}`);
+        }
+      } catch (err) {
+        console.error("[OAuth] 拉取配置失败:", err);
+      }
+
+      // 成功后同步工具定义到 Hub
+      if (tools && tools.length > 0) {
+        await hubClient.syncTools(tools).catch((err) => {
+          console.error("[OAuth] 同步工具失败:", err);
+        });
+      }
     }
 
     // 重定向到 returnUrl（如果有的话），否则返回 JSON

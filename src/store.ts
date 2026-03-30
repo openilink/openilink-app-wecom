@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Installation, MessageLink } from "./hub/types.js";
+import { encryptConfig, decryptConfig } from "./utils/config-crypto.js";
 
 /**
  * SQLite 持久化存储
@@ -49,6 +50,13 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_message_links_wx_user
         ON message_links(wx_user_id);
     `);
+
+    /** 追加 encrypted_config 列（已有表平滑迁移） */
+    try {
+      this.db.exec(`ALTER TABLE installations ADD COLUMN encrypted_config TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      // 列已存在则忽略
+    }
   }
 
   /* ======================== installations CRUD ======================== */
@@ -127,6 +135,35 @@ export class Store {
       )
       .get(wxUserId, installationId) as MessageLinkRow | undefined;
     return row ? rowToMessageLink(row) : undefined;
+  }
+
+  /* ======================== encrypted_config CRUD ======================== */
+
+  /**
+   * 将配置加密后保存到对应安装记录
+   * @param installationId - 安装实例 ID
+   * @param plainConfig    - 明文配置对象
+   * @param appToken       - 用于派生加密密钥的 app_token
+   */
+  saveConfig(installationId: string, plainConfig: Record<string, string>, appToken: string): void {
+    const cipher = encryptConfig(plainConfig, appToken);
+    this.db
+      .prepare("UPDATE installations SET encrypted_config = ? WHERE id = ?")
+      .run(cipher, installationId);
+  }
+
+  /**
+   * 读取并解密指定安装的配置
+   * @param installationId - 安装实例 ID
+   * @param appToken       - 用于派生解密密钥的 app_token
+   * @returns 解密后的配置对象，若无配置则返回 undefined
+   */
+  getConfig(installationId: string, appToken: string): Record<string, string> | undefined {
+    const row = this.db
+      .prepare("SELECT encrypted_config FROM installations WHERE id = ?")
+      .get(installationId) as { encrypted_config: string } | undefined;
+    if (!row || !row.encrypted_config) return undefined;
+    return decryptConfig(row.encrypted_config, appToken);
   }
 
   /** 关闭数据库连接 */

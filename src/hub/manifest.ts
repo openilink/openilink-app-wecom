@@ -12,6 +12,8 @@ export interface AppManifest {
   icon: string;
   description: string;
   events: string[];
+  /** 所需权限范围 */
+  scopes: string[];
   tools: ToolDefinition[];
   /** 配置项 JSON Schema */
   config_schema: Record<string, unknown>;
@@ -26,6 +28,7 @@ export const manifest: AppManifest = {
   icon: "\u{1F3E2}",
   description: "微信 ↔ 企业微信双向消息桥接 + 企业微信 AI Tools",
   events: ["message", "command"],
+  scopes: ["tools:write", "config:read"],
   tools: [],
   config_schema: {
     type: "object",
